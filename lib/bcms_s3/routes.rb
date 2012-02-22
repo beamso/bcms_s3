@@ -1,6 +1,6 @@
 module Cms::Routes
   def routes_for_bcms_s3
-    namespace(:cms) do |cms|
+    namespace(:cms) do
       #cms.content_blocks :s3s
     end  
   end
