@@ -40,7 +40,9 @@ module Cms
     module ContentController
       def self.included(controller_class)
         controller_class.alias_method_chain :render_page_with_caching, :s3
-        controller_class.alias_method_chain :try_to_stream_file, :s3
+        controller_class.skip_before_filter(:try_to_stream_file)
+        controller_class.append_before_filter(:try_to_stream_file_with_s3, :only => [:show])
+        # controller_class.alias_method_chain :try_to_stream_file, :s3
       end
       def render_page_with_caching_with_s3
         render_page
@@ -83,41 +85,62 @@ module Cms
       end
     end
     module Attachment
-      def self.included(model_class)
-        model_class.alias_method_chain :set_file_location, :s3
-        model_class.alias_method_chain :write_temp_file_to_storage_location, :s3
+      extend ActiveSupport::Concern 
+
+      included do |base|
+        puts "at the start of the include"
+        base.skip_callback(:validation, :before, :set_file_location)
+        base.skip_callback(:save, :after, :write_temp_file_to_storage_location)
+        base.set_callback(:validation, :before, :set_file_location_with_s3)
+        base.set_callback(:save, :after, :write_temp_file_to_storage_location_with_s3)
+        puts "at the end of the include"
       end
-      def set_file_location_with_s3
-        unless temp_file.blank? 
-          prefix = temp_file.original_filename.sub(/\..+$/,'') 
-          if temp_file.original_filename =~ /.+(\..+)$/ 
-            suffix = $1 
-          else 
-            suffix = "" 
+
+      module ClassMethods
+      # def self.included(model_class)
+       #  puts "self.included #{model_class}"
+        # model_class.alias_method_chain :set_file_location, :s3
+        # model_class.alias_method_chain :write_temp_file_to_storage_location, :s3
+        # model_class.skip_callback(:save, :after, :set_file_location)
+        # model_class.skip_callback(:validation, :before, :write_temp_file_to_storage_location)
+        # model_class.set_callback(:save, :after, :set_file_location_with_s3)
+        # model_class.set_callback(:validation, :before, :write_temp_file_to_storage_location_with_s3)
+        # puts "finished self.included #{model_class}"
+      # end
+        def set_file_location_with_s3
+          puts "***** set_file_location_with_s3"
+          unless temp_file.blank? 
+            prefix = temp_file.original_filename.sub(/\..+$/,'') 
+            if temp_file.original_filename =~ /.+(\..+)$/ 
+              suffix = $1 
+            else 
+              suffix = "" 
+            end 
+            new_filename = "#{prefix}-#{ActiveSupport::SecureRandom.hex(4)}#{suffix}" 
+            self.file_location = "#{Time.now.strftime("%Y/%m/%d")}/#{new_filename}" 
           end 
-          new_filename = "#{prefix}-#{ActiveSupport::SecureRandom.hex(4)}#{suffix}" 
-          self.file_location = "#{Time.now.strftime("%Y/%m/%d")}/#{new_filename}" 
-        end 
-      end
-      def write_temp_file_to_storage_location_with_s3
-        unless temp_file.blank?
-          FileUtils.mkdir_p File.dirname(full_file_location)  if !Cms::S3.enabled
-          if temp_file.local_path
-
-            if Cms::S3.enabled
-              s3 = RightAws::S3.new(Cms::S3.options[:access_key_id], Cms::S3.options[:secret_access_key] )
-              bucket = s3.bucket(Cms::S3.options[:bucket], true, 'public-read')
-              key = RightAws::S3::Key.create(bucket, file_location)
-              key.put(temp_file.read,'public-read', {"Content-Type" => file_type})
+        end
+        def write_temp_file_to_storage_location_with_s3
+          puts "***** write_temp_file_to_storage_location_with_s3"
+          unless temp_file.blank?
+            FileUtils.mkdir_p File.dirname(full_file_location)  if !Cms::S3.enabled
+            if temp_file.local_path
+  
+              if Cms::S3.enabled
+                s3 = RightAws::S3.new(Cms::S3.options[:access_key_id], Cms::S3.options[:secret_access_key] )
+                bucket = s3.bucket(Cms::S3.options[:bucket], true, 'public-read')
+                key = RightAws::S3::Key.create(bucket, file_location)
+                key.put(temp_file.read,'public-read', {"Content-Type" => file_type})
+              else
+                FileUtils.copy temp_file.local_path, full_file_location
+              end
             else
-              FileUtils.copy temp_file.local_path, full_file_location
+              open(full_file_location, 'w') {|f| f << temp_file.read }
             end
-          else
-            open(full_file_location, 'w') {|f| f << temp_file.read }
-          end
-
-          if Cms.attachment_file_permission  && !Cms::S3.enabled
-            FileUtils.chmod Cms.attachment_file_permission, full_file_location
+  
+            if Cms.attachment_file_permission  && !Cms::S3.enabled
+              FileUtils.chmod Cms.attachment_file_permission, full_file_location
+            end
           end
         end
       end
@@ -142,7 +165,8 @@ Cms::ContentController.send(:include, Cms::S3::ContentController)
 Attachment.send(:include, Cms::S3::Attachment)
 Cms::ApplicationController.send(:include, Cms::S3::ApplicationController)
 # ensure S3 storage disabled by default
-Cms::S3.enabled = false if Cms::S3.enabled.nil?
+# Cms::S3.enabled = false if Cms::S3.enabled.nil?
+Cms::S3.enabled = true if Cms::S3.enabled.nil?
 # ensure heroku caching disabled by default
 Cms::S3.heroku_caching = false if Cms::S3.heroku_caching.nil?
 # function to set domain prefix without url to 'www' is disabled by default
